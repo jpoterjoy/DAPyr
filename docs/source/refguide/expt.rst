@@ -124,21 +124,33 @@ Below are all parameters directly configuring the local particle filter.
    * - Parameter
      - Default
      - Description
-   * - `mixing_gamma`
-     - 0.3
-     - Mixing coefficient between prior resampled particles and current particles
    * - `kddm_flag`
      - 0
-     - Flag to turn on kernel density estimation step. 0 is off, 1 is on
+     - Kernel density distribution mapping after each LPF pass. 0 is off, 1 is on
    * - `min_res`
      - 0.0
-     - Minimum residual for beta inflation
+     - Fraction of each observation's information left unassimilated by the tempering (0 assimilates everything)
    * - `maxiter`
      - 1
-     - Maximum number of incremental steps of LPF updates to make
+     - Maximum number of LPF passes (1 = single pass; > 1 = tempered LPF, which stops once the residuals are used up)
    * - `Nt_eff`
      - 0.4
-     - Effective ensemble size
+     - Target effective ensemble size for tempering, as a fraction of `Ne`. Each variable's tempering coefficient is the largest that keeps the effective ensemble size at or above `Nt_eff*Ne`
+   * - `n_moments`
+     - 4
+     - Moments fitted by the Cornish-Fisher merge: 2 (mean, variance), 3 (+ skewness) or 4 (+ kurtosis)
+   * - `merge_flag`
+     - 0
+     - Merge method. 0 is moment matching (Cornish-Fisher), 1 is rank quantile mapping onto the weighted posterior
+   * - `qm_moments`
+     - 2
+     - With `merge_flag` 1, adjustment after quantile mapping: 2 exact posterior mean and variance, 1 mean only, 0 none
+   * - `resample_neff`
+     - 0.98
+     - An observation is resampled and merged only when the effective ensemble size of its tempered weights is below `resample_neff*Ne`; 1.0 merges unless the weights are uniform
+   * - `min_weight`
+     - 1e-15
+     - Weight floor: each observation's likelihood is tempered so that no normalized weight falls below `min_weight/Ne`. 0 is off
 
 modelParams
 ^^^^^^^^^^^^^

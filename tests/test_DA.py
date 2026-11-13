@@ -104,10 +104,10 @@ class TestDA(unittest.TestCase):
             N_eff = 0.4
             kddm_flag = 0
             maxiter = 1
-            alpha = 0.3
             min_res = 0.0
-            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne, alpha, 
-                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L)
+            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne,
+                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L,
+                                           rng = np.random.default_rng(10))
             self.assertTrue(np.allclose(xa_true, xa))
       
       def test_LPF_NoLocalize(self):
@@ -127,10 +127,10 @@ class TestDA(unittest.TestCase):
             N_eff = 0.4
             kddm_flag = 0
             maxiter = 1
-            alpha = 0.3
             min_res = 0.0
-            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne, alpha, 
-                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L)
+            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne,
+                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L,
+                                           rng = np.random.default_rng(10))
             print('marker')
             self.assertTrue(np.allclose(xa_true, xa))
       @pytest.mark.filterwarnings("ignore:No observations")
@@ -153,10 +153,10 @@ class TestDA(unittest.TestCase):
             N_eff = 0.4
             kddm_flag = 0
             maxiter = 1
-            alpha = 0.3
             min_res = 0.0
-            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne, alpha, 
-                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L)
+            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne,
+                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L,
+                                           rng = np.random.default_rng(10))
             self.assertTrue(np.isnan(xa))
             self.assertTrue(e_flag == 1)
 
@@ -177,10 +177,10 @@ class TestDA(unittest.TestCase):
             N_eff = 0.4
             kddm_flag = 0
             maxiter = 1
-            alpha = 0.3
             min_res = 0.0
-            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne, alpha, 
-                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L)
+            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne,
+                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L,
+                                           rng = np.random.default_rng(10))
             self.assertTrue(np.isnan(xa))
             self.assertTrue(e_flag == 1)
 
@@ -202,11 +202,11 @@ class TestDA(unittest.TestCase):
             N_eff = 0.4
             kddm_flag = 0
             maxiter = 1
-            alpha = 0.3
             min_res = 0.0
             self.assertEqual(len(Y.shape), 1)
-            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne, alpha, 
-                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L)
+            xa, e_flag = dap.DA.lpf_update(xf, xf, Y[:, None], H, C, N_eff*Ne,
+                                           min_res, maxiter, kddm_flag, e_flag, qcpass, L,
+                                           rng = np.random.default_rng(10))
 
             self.assertTrue(np.allclose(xa_true, xa))
 

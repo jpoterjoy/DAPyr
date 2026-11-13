@@ -111,44 +111,85 @@ def EnSRF_update(xf : np.ndarray, hx : np.ndarray,
         return xa_new, e_flag
 
 
-def lpf_update(x : np.ndarray, hx : np.ndarray, 
-               Y : np.ndarray, 
-               H : np.ndarray, C_pf : np.ndarray, 
+def lpf_update(x : np.ndarray, hx : np.ndarray,
+               Y : np.ndarray,
+               H : np.ndarray, C_pf : np.ndarray,
                N_eff : float,
-               min_res : int, maxiter : int, 
-               kddm_flag : int,  
+               min_res : float, maxiter : int,
+               kddm_flag : int,
                e_flag : int, qcpass : np.ndarray,
-               L: functools.partial ):
-    '''Performs a Local Particle Filter update based on Poterjoy et al. (2022).
-    
+               L : functools.partial,
+               n_moments : int = 4, merge_flag : int = 0, qm_moments : int = 2,
+               resample_neff : float = 0.98, min_weight : float = 1e-15,
+               rng : np.random.Generator = None,
+               cache_elems : int = 20_000_000):
+    '''Performs a Local Particle Filter update (Poterjoy 2016, 2022), following
+    the MATLAB LPF (Oct 2026) that the DART LPF is synchronized with.
+
+    Observations are assimilated one at a time. Every state variable and every
+    observation prior carries localized log-weights accumulated over the
+    observations processed so far. These are tempered with regularization
+    coefficients beta, chosen per variable so that the tempered weights keep an
+    effective ensemble size of N_eff. For each observation, particles are drawn by
+    systematic resampling from its tempered weights and merged with the current
+    particles using the tempered localization beta*rho; the merge matches the
+    first four moments of the weighted marginal (Cornish-Fisher), or the whole
+    marginal (rank quantile mapping). Model- and observation-space particles are
+    updated by the same steps. The remaining residual 1 - sum(beta) is
+    assimilated in further passes (tempering) until it is used up or maxiter
+    passes have run.
+
     Parameters
     ----------
-    xf : np.ndarray
+    x : np.ndarray
         Array of size Nx x Ne containing the ensemble members
     hx : np.ndarray
         Array of size Ny x Ne containing the ensemble members projected into obs-space
     Y : np.ndarray
         Array of size Ny x 1 containing the observations at time T
-    var_y : float
-        Observation variance
     H : np.ndarray
         Array of size Ny x Nx representing the measurement operator
     C_pf : np.ndarray
         Localization matrix of size Ny x Nx in state-space
     N_eff : float
-        Effective Ensemble Size
+        Target effective ensemble size (number of particles, not a fraction)
     min_res : float
-        Minimum residual for computing betas
+        Fraction of each observation's information that is not assimilated
+        (residual left after tempering; 0 assimilates everything)
     maxiter : int
-        Maximum number of iterations of incremental LPF updates to perform
+        Maximum number of tempering passes (1 = single pass)
     kddm_flag : int
-        Flag to turn on kernal density estimation. 0 for off, 1 for on. 
+        1 to map particles with kernel density distribution mapping after each pass
     e_flag : int
         Error flag
     qcpass : np.ndarray
-        Array of length Ny repesenting quality control of observations
+        Array of length Ny repesenting quality control of observations (1 = rejected)
     L : functools.partial
         Callable likelihood function L(y, hx). The first argument is a vector of scalar observations, and the second argument is the model state projected into observation space.
+        If L has an attribute neg_log (as the likelihoods from OBS_ERRORS.get_likelihood do), L.neg_log(y, hx)
+        is used for the negative log-likelihood, which avoids underflow for particles far from the observation.
+    n_moments : int, optional
+        Moments fitted by the Cornish-Fisher merge: 2 (mean, variance), 3 (+ skewness)
+        or 4 (+ kurtosis). Default 4.
+    merge_flag : int, optional
+        0 = moment-matching (Cornish-Fisher) merge, 1 = rank quantile-mapping merge. Default 0.
+    qm_moments : int, optional
+        With merge_flag = 1, adjustment after quantile mapping: 2 = exact posterior mean
+        and variance, 1 = mean only, 0 = none. Default 2.
+    resample_neff : float, optional
+        An observation is resampled and merged only when the effective ensemble size of
+        its tempered weights is below resample_neff*Ne; otherwise nearby variables only
+        accumulate its weights. Default 0.98; 1.0 merges unless weights are uniform.
+    min_weight : float, optional
+        Weight floor: each observation's likelihood is tempered so that no normalized
+        weight falls below min_weight/Ne. 0 turns it off. Default 1e-15.
+    rng : np.random.Generator, optional
+        Random number generator for resampling. Default: a new unseeded generator.
+    cache_elems : int, optional
+        The localized log-weight terms of all observations (Ny x (Nx+Ny) x Ne values)
+        are kept between the regularization and update passes when they number at
+        most cache_elems (default 2e7, 160 MB); otherwise they are recomputed.
+        Results are the same either way.
 
     Returns
     --------
@@ -157,170 +198,127 @@ def lpf_update(x : np.ndarray, hx : np.ndarray,
     e_flag : int
         Error flag after data assimilation step
     '''
-    if e_flag != 0 :
+    if e_flag != 0:
         return np.nan, e_flag
 
     if np.sum(qcpass) == len(Y):
         warnings.warn('No observations pass QAQC, error_flag set to 1.')
         e_flag = 1
         return np.nan, e_flag
-    
-    if len(Y.shape) == 1: #If Y is 1-dimensional, make it the correct dimension
+
+    if np.any(np.isnan(x)):
+        e_flag = 1
+        return np.nan, e_flag
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    Y = np.asarray(Y)
+    if Y.ndim == 1:
         Y = Y[:, None]
+    hx = np.atleast_2d(hx)
 
     Nx, Ne = x.shape
     HCH = np.matmul(C_pf, H.T)
 
-    Y = Y[qcpass == 0, :]
-    hx = hx[qcpass == 0, :]
-    C_pf = C_pf[qcpass == 0, :]
-    HCH = HCH[qcpass == 0, :]
-    HCH = HCH[:, qcpass == 0]
+    keep = (qcpass == 0)
+    Y = Y[keep, :]
+    hx = hx[keep, :]
+    HC = C_pf[keep, :]
+    HCH = HCH[keep, :][:, keep]
     Ny = len(Y)
 
-    epsilon = 1E-300
+    # Stack model- and obs-space particles; rows ix are x, rows iy are hx
+    ix = np.arange(Nx)
+    iy = np.arange(Nx, Nx + Ny)
+    z = np.vstack([x, hx]).astype(float)
+    C = np.hstack([HC, HCH])  # localization between each obs and each row of z
+    Nv = Nx + Ny
+
+    epsilon = 1e-30  # added inside the logs of the localized weights
+    res = np.ones(Nv) - min_res
+
     max_res = 1.0
-    beta = np.ones((Nx,))
-    beta_y = np.ones((Ny,))
-    res = np.ones(beta.shape)
-    res_y = np.ones(beta_y.shape)
     niter = 0
-    pf_infl = np.ones((Ny,))
-    res_infl = np.ones(pf_infl.shape)
-
-    res = res- min_res
-    res_y = res_y - min_res
-
-    #Beta stuff begins
     while max_res > 0 and min_res < 1:
         niter += 1
-        xo = x.copy()
-        hx = hx.squeeze()
-        hxo = copy.deepcopy(hx)
-        if len(hxo.shape) == 1:
-             hxo = hxo[None, :]
-        if len(hx.shape) == 1:
-             hx = hx[None, :]
-        
-        omega = np.ones((Nx, Ne))*(1/Ne) #Nx x Ne
-        omega_y = np.ones((Ny, Ne))*(1/Ne)
-        lomega = np.zeros_like(omega)
-        lomega_y = np.zeros_like(omega_y)
+        zo = z.copy()
 
-        wo = L(Y, hxo)
-        wo = wo/np.sum(wo, axis = -1)[:, None]
-
+        # Obs-space likelihood weights, tempered so that no normalized weight
+        # falls below min_weight/Ne
+        if hasattr(L, 'neg_log'):
+            d = L.neg_log(Y, zo[iy, :])
+        else:
+            d = -np.log(np.maximum(L(Y, zo[iy, :]), np.finfo(float).tiny))
+        d = d - np.min(d, axis=1, keepdims=True)
+        wo = np.exp(-d)
+        if min_weight > 0:
+            # floor check for all obs at once; bisection only where it is needed
+            ws = np.sum(wo, axis=1)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ok = (ws > 0) & (np.min(wo, axis=1) / ws > min_weight / Ne)
+            for i in np.where(~ok)[0]:
+                wo[i] = np.exp(-d[i] * MISC.find_obs_infl(d[i], min_weight / Ne))
+        wo = wo / np.sum(wo, axis=1, keepdims=True)
         if np.any(np.isnan(wo)):
             e_flag = 1
             return np.nan, e_flag
 
-        beta_y, res_y = MISC.get_reg(Ny, Ne, HCH, wo, N_eff, res_y)
-        beta, res = MISC.get_reg(Nx, Ne, C_pf, wo, N_eff, res)
-        
-        wo_ind = np.where(1 < 0.98*Ne*np.sum(wo**2, axis = -1))[0]
-        #Obs loop
-        for i in wo_ind:
-            beta_ind = np.where(beta != 0)[0]
-            wt = Ne*wo[i, :] - 1 #Ne Array
-            C = C_pf[i, beta_ind] #Nxb array
-            dum = np.zeros((len(beta_ind), Ne))
-            if np.any(C == 1.0):
-                dum[C==1.0, :] = np.log(Ne*wo[i, :] + epsilon) 
-            dum[C!= 1.0, :] = np.log(np.matmul(C[C!=1.0][:, None], wt[None, :]) + 1 + epsilon)
-            lomega[beta_ind, :] = lomega[beta_ind, :] - dum
-            lomega[beta_ind, :] = lomega[beta_ind, :] - np.min(lomega[beta_ind, :], axis = -1)[:, None]
+        # Localized log-weight terms log((Ne*w - 1)*rho + 1) for each obs; kept
+        # from the regularization pass for the update pass when they fit in memory
+        def logw_term(i):
+            return np.log(np.outer(C[i], Ne * wo[i] - 1) + 1 + epsilon)
+        cache = [] if Ny * Nv * Ne <= cache_elems else None
 
-            beta_ind = np.where(beta_y != 0)[0]
-            wt = Ne*wo[i, :] - 1 #Ne Array
-            C = HCH[i, beta_ind] #Nxb array
-            dum = np.zeros((len(beta_ind), Ne))
-            if np.any(C == 1.0):
-                dum[C==1.0, :] = np.log(Ne*wo[i, :] + epsilon) 
-            dum[C!= 1.0, :] = np.log(np.matmul(C[C!=1.0][:, None], wt[None, :]) + 1 + epsilon)
-            lomega_y[beta_ind, :] = lomega_y[beta_ind, :] - dum
-            lomega_y[beta_ind, :] = lomega_y[beta_ind, :] - np.min(lomega_y[beta_ind, :], axis = -1)[:, None]
+        # Regularization coefficients from the log-weights of all observations
+        lw = np.zeros((Nv, Ne))
+        for i in range(Ny):
+            term = logw_term(i)
+            if cache is not None:
+                cache.append(term)
+            lw -= term
+            lw -= np.min(lw, axis=1, keepdims=True)
+        beta, res = MISC.get_reg(lw, N_eff, res)
 
-            #Normalize
-            #lomega is Nx x Ne
-            #omega needs to be Nx x Ne
+        # Update pass: tempered weights and posterior moments after each observation
+        # depend only on the particles at the start of the pass (zo)
+        lw = np.zeros((Nv, Ne))
+        for i in range(Ny):
+            lw -= cache[i] if cache is not None else logw_term(i)
+            lw -= np.min(lw, axis=1, keepdims=True)
+            omega = np.exp(-lw * beta[:, None])
+            omega = omega / np.sum(omega, axis=1, keepdims=True)
+            zm = np.sum(omega * zo, axis=1)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                zv = np.sum(omega * (zo - zm[:, None])**2, axis=1) / (1 - np.sum(omega**2, axis=1))
+            zv = np.where(np.isfinite(zv), zv, 0.0)
 
-            omega = np.exp(-lomega * beta[:, None])
-            omega_y =  np.exp(-lomega_y * beta_y[:, None])
+            if np.any(np.isnan(zm[ix])):
+                e_flag = 1
+                return np.nan, e_flag
 
-            omegas_y = np.sum(omega_y, axis = -1)[:, None] #Sum over Ensemble Members
-            omegas = np.sum(omega, axis = -1)[:, None]
-
-            omega = omega/omegas
-            xmpf = np.sum(omega*xo, axis = -1)[:, None]
-            omega_y = omega_y/ omegas_y
-            hxmpf =np.sum(omega_y*hxo, axis = -1)[:, None]
-
-            if (1 > 0.98*Ne*sum(omega_y[i, :]**2)):
+            # Skip resampling and merging if few particles would be removed
+            w = omega[iy[i]]
+            if 1 > resample_neff * Ne * np.sum(w**2):
                 continue
 
-            var_a = np.sum(omega*(xo - xmpf)**2, axis = -1)[:, None]
-            var_a_y = np.sum(omega_y*(hxo - hxmpf)**2, axis = -1)[:, None]
+            ind = MISC.systematic_sampling(w, rng)
+            loc = C[i] * beta
+            if merge_flag == 1:
+                z = MISC.pf_merge_qm(z, zo[:, ind], loc, zm, zv, omega, zo, qm_moments)
+            else:
+                z = MISC.pf_merge_cf(z, zo[:, ind], loc, zm, zv, omega, zo, n_moments)
 
-            norm = (1 - np.sum(omega**2, axis = -1))[:, None]
-            var_a = var_a/norm
-            norm = (1 - np.sum(omega_y**2, axis = -1))[:, None]
-            var_a_y = var_a_y/norm
-            #ks = np.random.choice(Ne, Ne, p = omega_y[i, :], replace=True)
-            ks = MISC.sampling(hxo[i, :], omega_y[i, :], Ne)
-            x = _pf_merge(x, xo[:, ks], C_pf[i, :] * beta, Ne, xmpf, var_a)
-            hx = _pf_merge(hx, hxo[:, ks], HCH[i, :] * beta_y, Ne, hxmpf, var_a_y)
-        if kddm_flag == 1:
-            for j in range(Nx):
-                if np.var(x[j, :], ddof = 1) > 0:
-                    x[j, :] = MISC.kddm(x[j, :], xo[j, :], omega[j, :])
+        # KDDM with the weights after the last observation
+        if kddm_flag == 1 and Ny > 0:
+            z = MISC.kddm_rows(z, zo, omega)
 
-            xmpf = np.mean(x, axis=1)
-
-            for j in range(Ny):
-                hx[j, :] = MISC.kddm(hx[j, :], hxo[j, :], omega_y[j, :])
-        max_res = np.max(res)
+        max_res = np.max(res[iy]) if Ny > 0 else 0.0
         if niter == maxiter:
             break
-    return x, e_flag
 
-def _pf_merge(x, xs, loc, Ne, xmpf, var_a):
-    '''Performs the merge step of the Local Particle Filter
-    
-    Parameters
-    ------------
-    x : np.ndarray
-    
-    xs : np.ndarray
-
-    loc : np.ndarray
-
-    Ne : int
-
-    xmpf : np.ndarray
-
-    var_a : np.ndarray
-
-    Returns
-    --------
-    xa : np.ndarray
-        Merged ensemble members
-    '''
-
-    if np.all(loc == 1):
-        xmpf = np.mean(xs, axis = -1)[:, None]
-        var_a = np.var(xs, axis = -1, ddof = 1)[:, None]
-    r1 = loc
-    r2 = 1 - loc
-    xs = xs - xmpf
-    x = x - xmpf
-    xa = xmpf + r1[:, None]*xs + r2[:, None]*x
-    pfm = (np.sum(xa, axis = -1)/Ne)[:, None]
-    pfv = (np.sum((xa - pfm)**2, axis=-1) / (Ne - 1))[:, None]
-
-    ratio = np.divide(var_a, pfv, out=np.ones_like(pfv, dtype=float), where=(pfv > 0))
-    xa = xmpf + (xa - pfm) * np.sqrt(ratio)
-
-    return xa
-
-
-
+    xa = z[ix, :]
+    if np.any(~np.isfinite(xa)):
+        e_flag = 1
+        return np.nan, e_flag
+    return xa, e_flag

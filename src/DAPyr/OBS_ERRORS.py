@@ -97,26 +97,36 @@ def get_likelihood(assumed_obs_err_dist: int, assumed_obs_err_params: dict):
 
     """
 
+    def gaussian_nll(y, hx, mu, sigma):
+        return (y - hx - mu) ** 2 / (2 * sigma**2)
+
     def gaussian_l(y, hx, mu, sigma):
-        d = (y - hx - mu) ** 2 / (2 * sigma**2)
+        d = gaussian_nll(y, hx, mu, sigma)
         d -= np.min(d, axis=-1)[:, None]
         return np.exp(-d)
 
-    def state_dep_gaussian_l(y, hx, mu1, mu2, sigma1, sigma2, threshold):
-        l_low = np.exp(-((y - hx - mu1) ** 2 / (2 * sigma1**2)))
-        l_high = np.exp(-((y - hx - mu2) ** 2 / (2 * sigma2**2)))
-        return np.where(hx < threshold, l_low, l_high)
+    def state_dep_gaussian_nll(y, hx, mu1, mu2, sigma1, sigma2, threshold):
+        d_low = (y - hx - mu1) ** 2 / (2 * sigma1**2)
+        d_high = (y - hx - mu2) ** 2 / (2 * sigma2**2)
+        return np.where(hx < threshold, d_low, d_high)
 
+    def state_dep_gaussian_l(y, hx, mu1, mu2, sigma1, sigma2, threshold):
+        return np.exp(-state_dep_gaussian_nll(y, hx, mu1, mu2, sigma1, sigma2, threshold))
+
+    # Each likelihood also carries its negative log-likelihood (up to a constant) as
+    # L.neg_log(y, hx); the LPF uses it to avoid underflow of exp(-d) for distant particles
     match assumed_obs_err_dist:
         case 0:
             try:
-                return partial(gaussian_l, mu=assumed_obs_err_params["mu"], sigma=assumed_obs_err_params["sigma"])
+                kw = dict(mu=assumed_obs_err_params["mu"], sigma=assumed_obs_err_params["sigma"])
             except KeyError:
                 raise dapExceptions.BadObsParams('mu and sigma', assumed_obs_err_params)
+            L = partial(gaussian_l, **kw)
+            L.neg_log = partial(gaussian_nll, **kw)
+            return L
         case 1:
             try:
-                return partial(
-                    state_dep_gaussian_l,
+                kw = dict(
                     mu1=assumed_obs_err_params["mu1"],
                     sigma1=assumed_obs_err_params["sigma1"],
                     mu2=assumed_obs_err_params["mu2"],
@@ -125,3 +135,6 @@ def get_likelihood(assumed_obs_err_dist: int, assumed_obs_err_params: dict):
                 )
             except KeyError:
                 raise dapExceptions.BadObsParams('mu1, sigma1, mu2, sigma2', assumed_obs_err_params)
+            L = partial(state_dep_gaussian_l, **kw)
+            L.neg_log = partial(state_dep_gaussian_nll, **kw)
+            return L

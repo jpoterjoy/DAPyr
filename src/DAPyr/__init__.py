@@ -288,6 +288,11 @@ class Expt:
             self.obsParams['min_res'] = 0.0
             self.obsParams['maxiter'] = 1
             self.obsParams['Nt_eff'] = 0.4
+            self.obsParams['n_moments'] = 4       #Moments fitted by the Cornish-Fisher merge (2, 3 or 4)
+            self.obsParams['merge_flag'] = 0      #0: Cornish-Fisher moment matching, 1: rank quantile mapping
+            self.obsParams['qm_moments'] = 2      #Quantile-mapping adjustment: 2 mean+variance, 1 mean, 0 none
+            self.obsParams['resample_neff'] = 0.98 #Resample/merge an ob only if its Neff < resample_neff*Ne
+            self.obsParams['min_weight'] = 1e-15  #Likelihood weight floor (min normalized weight * Ne); 0 = off
 
             #Observation Error Distribution Parameters
             default_gaussian_params = {'mu': 0, 'sigma' : 1}
@@ -458,7 +463,14 @@ class Expt:
                   1: On
             maxiter: {self.getParam('maxiter')} # Maximum number of tempering iterations to run
             min_res: {self.getParam('min_res')} # Minimum residual
-            Nt_eff: {self.getParam('Nt_eff')} # Effective Ensemble Size
+            Nt_eff: {self.getParam('Nt_eff')} # Target effective ensemble size for tempering, as a fraction of Ne
+            n_moments: {self.getParam('n_moments')} # Moments fitted by the Cornish-Fisher merge (2, 3 or 4)
+            merge_flag: {self.getParam('merge_flag')} # Merge method
+                  0: Moment matching (Cornish-Fisher)
+                  1: Rank quantile mapping
+            qm_moments: {self.getParam('qm_moments')} # Quantile-mapping adjustment: 2 mean and variance, 1 mean, 0 none
+            resample_neff: {self.getParam('resample_neff')} # Resample and merge an observation only if its Neff < resample_neff*Ne
+            min_weight: {self.getParam('min_weight')} # Weight floor: no normalized likelihood weight below min_weight/Ne (0 = off)
             ------------------------
             Miscellaneous Information
             ------------------------
@@ -982,6 +994,13 @@ def runDA(expt: Expt, maxT : int = None):
       min_res = expt.getParam('min_res')
       kddm_flag = expt.getParam('kddm_flag')
       maxiter = expt.getParam('maxiter')
+      # LPF options; experiments saved before these existed use the lpf_update defaults
+      lpf_opts = {key: expt.getParam(key) for key in
+                  ('n_moments', 'merge_flag', 'qm_moments', 'resample_neff', 'min_weight')}
+      lpf_opts = {key: val for key, val in lpf_opts.items() if val is not None}
+      seed = expt.getParam('seed')
+      # Separate stream for LPF resampling, reproducible when a seed is set
+      lpf_rng = np.random.default_rng([seed, 1]) if seed is not None and seed >= 0 else np.random.default_rng()
       HC =  np.matmul(C,H.T)
       gamma = expt.getParam('gamma')
       assumed_obs_err_dist = expt.getParam('assumed_obs_err_dist')
@@ -1110,7 +1129,8 @@ def runDA(expt: Expt, maxT : int = None):
                         else:
                               xa, infs, infs_y, var_infs, var_infs_y, e_flag = da_results
                   case 1: #LPF
-                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
+                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L,
+                                                   rng = lpf_rng, **lpf_opts)
                   case 2: # Nothing
                         xa = xf
 
